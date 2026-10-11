@@ -1,10 +1,9 @@
 name: SSH Windows hosts
 
-# Design D5/D6 exit gate, Windows half: the real client-side relay deploy against a real
-# Win32-OpenSSH server on 127.0.0.1 (inbox capability and the pinned 10.0.0.0p2-Preview release),
-# on x64 and arm64. Each job provisions a private sshd service and one standard account per cell
-# (config/ci/windows-ssh-provider/), hides the host toolchain from SSH sessions behind logging
-# shims, and asserts rung A on the pinned node.exe in both DefaultShell cases plus the opt-out.
+# Managed orcad against a real Win32-OpenSSH server on 127.0.0.1 (inbox capability and the pinned
+# 10.0.0.0p2-Preview release), on x64 and arm64. Each job provisions a private sshd service and one
+# standard account per cell (config/ci/windows-ssh-provider/), hides the host toolchain from SSH
+# sessions behind logging shims, and deploys orcad on the pinned node.exe in both DefaultShell cases.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -30,13 +29,11 @@ on:
       - 'native/windows-cli-launcher/**'
       - 'src/main/orcad/orcad-cli-launcher.ts'
       - '.github/actions/prepare-windows-cli-launcher/**'
-      - 'config/scripts/build-relay.mjs'
       - 'config/patches/node-pty*'
       - 'config/patches/@vscode__windows-process-tree*'
       - 'config/scripts/build-windows-process-tree-relay-addon.mjs'
       - 'config/scripts/relay-windows-process-tree-prepared-addon*.mjs'
       - 'config/scripts/windows-process-tree-gyp-rebuild.mjs'
-      - 'src/shared/relay-windows-breakaway-launch.ts'
       - 'src/shared/windows-breakaway-launch*.ts'
       - 'src/main/ipc/ssh-host-server-*.ts'
       - '!src/**/*.test.ts'
@@ -136,8 +133,8 @@ jobs:
           native-runtime: node
           cache-pnpm-store: 'false'
       # The deploy materializes rung A from this template; only this runner's slot exists here.
-      # The process-tree addon carries the launcher that starts the relay outside sshd's job; the
-      # orcad slot and the relay both stage it, and a standard-user host has no other launch route.
+      # The process-tree addon carries the launcher that starts orcad outside sshd's job; the orcad
+      # slot stages it, and a standard-user host has no other launch route.
       - name: Build this runner's Windows process-table addon
         shell: bash
         env:
@@ -155,12 +152,11 @@ jobs:
       - uses: ./.github/actions/prepare-windows-cli-launcher
         with:
           arches: ${{ matrix.arch }}
-      - name: Build the win32 template and the relay
+      - name: Build the win32 template
         shell: bash
         run: |
           pnpm build:orcad-prebuilds --require-slots "win32-${{ matrix.arch }}"
           node config/scripts/build-orcad-template.mjs --targets "win32-${{ matrix.arch }}"
-          pnpm run build:relay
       - wait: inbox-capability
       - name: Run the Windows host cells against a private ${{ matrix.server }} sshd
         shell: pwsh
@@ -190,7 +186,7 @@ jobs:
             if($LASTEXITCODE -ne 0){throw 'SSH archive fetch failed'}
           }
           $callback={param($context)
-            & (Join-Path $tools 'invoke-pinned-relay-cells.ps1') -SourceRoot $sourceRoot -Context $context -Target 'win32-${{ matrix.arch }}' -ReceiptRoot $receipts -Cells $cells
+            & (Join-Path $tools 'invoke-windows-host-cells.ps1') -SourceRoot $sourceRoot -Context $context -Target 'win32-${{ matrix.arch }}' -ReceiptRoot $receipts -Cells $cells
           }.GetNewClosure()
           & (Join-Path $tools 'preview-ssh/prove-preview-openssh.ps1') -Archive $archive -Arch '${{ matrix.arch }}' -Server '${{ matrix.server }}' -Receipt (Join-Path $receipts 'provider-server.json') -InboxPreparationReceipt $preparation -Accounts $cells.Count -ForwardingAccounts $forwarding -HiddenTools @('npm','npx','node-gyp','gcc','g++','cc','c++','make','cl','clang','clang++','msbuild','cmake') -HostCellProbe $callback 2>&1 | Tee-Object (Join-Path $receipts 'provision.log')
       - uses: actions/upload-artifact@v7

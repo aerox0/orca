@@ -1,8 +1,9 @@
 // Managed orcad on a real Win32-OpenSSH host, one cell per DefaultShell: resolve the context
 // (pinned node.exe, host script), deploy and activate, prove readiness and liveness, reach orcad
-// through the stdio bridge (this account's sshd refuses forwarding), decommission
-// through the instance-bound stop request, prove exit, and run a GC pass. config/ci/windows-ssh-provider/invoke-pinned-relay-cells.ps1
-// provisions the account and runs this file for `orcad-*` cells; ssh-windows-hosts.yml runs that.
+// through the stdio bridge (this account's sshd refuses forwarding), decommission through the
+// instance-bound stop request, prove exit, and run a GC pass.
+// config/ci/windows-ssh-provider/invoke-windows-host-cells.ps1 provisions the account and runs this
+// file for `orcad-*` cells; ssh-windows-hosts.yml runs that.
 //
 // Run: ORCA_RUN_SSH_WINDOWS_HOST=1 ORCA_SSH_WINDOWS_HOST_CELL=<descriptor.json> pnpm test <this file>
 import { randomUUID } from 'node:crypto'
@@ -59,11 +60,7 @@ describe.runIf(RUN)('managed orcad on a Windows OpenSSH host', () => {
       if (!isWindowsOrcadCellId(descriptor.cell)) {
         throw new Error(`${descriptor.cell} is not a managed orcad cell`)
       }
-      const sshTarget = windowsHostSshTarget(
-        descriptor,
-        { id: descriptor.cell, remoteRuntime: 'pinned-node' },
-        randomUUID()
-      )
+      const sshTarget = windowsHostSshTarget(descriptor, randomUUID())
       let exec: MockInstance<SshConnection['exec']> | null = null
       const receipt: Record<string, unknown> = { cell: descriptor.cell, target: descriptor.target }
       let conn: SshConnection | null = null

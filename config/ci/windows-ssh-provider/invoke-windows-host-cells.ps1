@@ -6,13 +6,13 @@ param(
  [Parameter(Mandatory=$true)][hashtable]$Context,
  [Parameter(Mandatory=$true)][ValidateSet('win32-arm64','win32-x64')][string]$Target,
  [Parameter(Mandatory=$true)][string]$ReceiptRoot,
- [ValidateSet('pinned-cmd','pinned-powershell','legacy-opt-out','orcad-cmd','orcad-powershell','orcad-convert','orcad-cli-managed','orcad-cli-convert','orcad-cli-relay-kept')][string[]]$Cells=@('pinned-cmd','pinned-powershell','legacy-opt-out','orcad-cmd','orcad-powershell')
+ [ValidateSet('orcad-cmd','orcad-powershell','orcad-convert','orcad-cli-managed','orcad-cli-convert')][string[]]$Cells=@('orcad-cmd','orcad-powershell')
 )
 $ErrorActionPreference='Stop'
 if($env:GITHUB_ACTIONS -ne 'true' -or $env:ORCA_ISOLATED_SSH_CI -ne '1'){throw 'Disposable CI only'}
-$shells=@{'pinned-cmd'='cmd';'pinned-powershell'='powershell';'legacy-opt-out'='cmd';'orcad-cmd'='cmd';'orcad-powershell'='powershell';'orcad-convert'='cmd';'orcad-cli-managed'='cmd';'orcad-cli-convert'='cmd';'orcad-cli-relay-kept'='cmd'}
+$shells=@{'orcad-cmd'='cmd';'orcad-powershell'='powershell';'orcad-convert'='cmd';'orcad-cli-managed'='cmd';'orcad-cli-convert'='cmd'}
 # App-level cells drive the e2e build (and the bundled CLI) against the host; each greps one tagged test.
-$appCells=@{'orcad-convert'=@('tests/e2e/ssh-orcad-auto-convert.spec.ts','');'orcad-cli-managed'=@('tests/e2e/ssh-orcad-windows-cli-matrix.spec.ts','@orcad-cli-managed');'orcad-cli-convert'=@('tests/e2e/ssh-orcad-windows-cli-matrix.spec.ts','@orcad-cli-convert');'orcad-cli-relay-kept'=@('tests/e2e/ssh-orcad-windows-cli-matrix.spec.ts','@orcad-cli-relay-kept')}
+$appCells=@{'orcad-convert'=@('tests/e2e/ssh-orcad-auto-convert.spec.ts','');'orcad-cli-managed'=@('tests/e2e/ssh-orcad-windows-cli-matrix.spec.ts','@orcad-cli-managed');'orcad-cli-convert'=@('tests/e2e/ssh-orcad-windows-cli-matrix.spec.ts','@orcad-cli-convert')}
 $electronBuilt=$false
 if($Context.accounts.Count -lt $Cells.Count){throw 'Each cell needs its own private account'}
 $seenApp=$false
@@ -48,9 +48,9 @@ function Set-PrivateDefaultShell([string]$Shell) {
   }
 }
 
-# Diagnostic only: Orca must launch the relay without WMI, which refuses a standard user's SSH
+# Diagnostic only: Orca must launch orcad without WMI, which refuses a standard user's SSH
 # (network) logon unless an administrator grants Remote Enable on root\cimv2. The cells run with no
-# such grant, so a relay launch that still needs WMI fails its cell. Prints ORCA_WMI=<ReturnValue>
+# such grant, so a launch that still needs WMI fails its cell. Prints ORCA_WMI=<ReturnValue>
 # or ORCA_WMI=denied.
 function Test-PrivateWmiLaunch([string]$Account) {
   $out=Invoke-PrivateSsh $Account 'powershell.exe -NoProfile -NonInteractive -Command "try{$r=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=''cmd.exe /d /c exit 0''} -ErrorAction Stop;''ORCA_WMI=''+$r.ReturnValue}catch{''ORCA_WMI=denied''}"'
@@ -99,7 +99,7 @@ try {
   $env:ORCA_BACKGROUND_LAUNCH='1'
   # DefaultShell is still stock cmd here.
   $wmi=Test-PrivateWmiLaunch $Context.accounts[0].name
-  Write-Host "Standard SSH user WMI Win32_Process.Create: $wmi (no grant; the relay launch must not depend on it)"
+  Write-Host "Standard SSH user WMI Win32_Process.Create: $wmi (no grant; the orcad launch must not depend on it)"
   $summary.Add(@{standardUserWmiLaunch=$wmi;granted=$false})
   for($index=0;$index -lt $Cells.Count;$index++){
     $cell=$Cells[$index];$account=$Context.accounts[$index];$shell=$shells[$cell]
@@ -122,21 +122,20 @@ try {
       # Why global: under the workflow's GetNewClosure callback, bare $LASTEXITCODE reads a stale captured copy.
       $code=$global:LASTEXITCODE
     }
-    # The relay's own log is the only record of why it closed a client.
     # orcad.log holds only the last launch on Windows; orcad.log.1 is the one before a restart.
-    foreach($log in @(Get-ChildItem -Path (Join-Path $account.home '.orca-remote\relay-*\relay*.log'),(Join-Path $account.home '.orca-remote\orcad-*\orcad.log'),(Join-Path $account.home '.orca-remote\orcad-*\orcad.log.1') -File -ErrorAction SilentlyContinue)){Copy-Item -LiteralPath $log.FullName -Destination (Join-Path $ReceiptRoot "$cell.$($log.Directory.Name).$($log.Name)")}
+    foreach($log in @(Get-ChildItem -Path (Join-Path $account.home '.orca-remote\orcad-*\orcad.log'),(Join-Path $account.home '.orca-remote\orcad-*\orcad.log.1') -File -ErrorAction SilentlyContinue)){Copy-Item -LiteralPath $log.FullName -Destination (Join-Path $ReceiptRoot "$cell.$($log.Directory.Name).$($log.Name)")}
     if(Test-Path -LiteralPath $Context.forbiddenToolLog){Copy-Item -LiteralPath $Context.forbiddenToolLog -Destination (Join-Path $ReceiptRoot "$cell.forbidden-tool-calls.log")}
     $summary.Add(@{cell=$cell;shell=$shell;account=$account.name;exitCode=$code})
     if($code -ne 0){$failed.Add($cell)}
   }
-  # Relays outlive their client by a 60s grace; wait so cleanup can unload the profiles.
+  # Host processes can outlive their client; wait so cleanup can unload the profiles.
   $homes=@($Context.accounts | ForEach-Object {$_.home.TrimEnd('\')+'\'})
   $graceDeadline=[DateTime]::UtcNow.AddSeconds(120)
   do {
-    $relays=@(Get-CimInstance Win32_Process | Where-Object {$path=$_.ExecutablePath;$path -and @($homes | Where-Object {$path.StartsWith($_,[StringComparison]::OrdinalIgnoreCase)}).Count})
-    if(-not $relays.Count){break};Start-Sleep -Seconds 2
+    $hostProcesses=@(Get-CimInstance Win32_Process | Where-Object {$path=$_.ExecutablePath;$path -and @($homes | Where-Object {$path.StartsWith($_,[StringComparison]::OrdinalIgnoreCase)}).Count})
+    if(-not $hostProcesses.Count){break};Start-Sleep -Seconds 2
   } while([DateTime]::UtcNow -lt $graceDeadline)
-  $summary.Add(@{relayProcessesAfterGrace=@($relays | ForEach-Object {[IO.Path]::GetFileName($_.ExecutablePath)})})
+  $summary.Add(@{hostProcessesAfterGrace=@($hostProcesses | ForEach-Object {[IO.Path]::GetFileName($_.ExecutablePath)})})
 } finally {
   Set-PrivateDefaultShell 'cmd'
   if($knownExisted){[IO.File]::WriteAllBytes($knownPath,$priorKnown)}else{Remove-Item -LiteralPath $knownPath -Force -ErrorAction SilentlyContinue}
