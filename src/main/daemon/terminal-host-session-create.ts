@@ -16,6 +16,7 @@ import type { CreateOrAttachResult } from './terminal-host-create-contract'
 import type { TerminalHostOptions } from './terminal-host-options'
 import type { TerminalHostTombstones } from './terminal-host-tombstones'
 import type { TerminalSessionTeardown } from './terminal-session-teardown'
+import type { TerminalSpawnGate } from './terminal-spawn-gate'
 import { resolveDaemonSessionScrollbackRows } from './daemon-session-scrollback-window'
 import { TerminalAttachCanceledError } from './daemon-errors'
 import { waitForTerminalAttachOperation } from './terminal-attach-cancellation'
@@ -29,6 +30,7 @@ type TerminalHostSessionCreateDependencies = {
   sessionTeardown: TerminalSessionTeardown
   killedTombstones: TerminalHostTombstones
   spawnSubprocess: TerminalHostOptions['spawnSubprocess']
+  spawnGate: TerminalSpawnGate | undefined
   onDeadSessionRemoved: (sessionId: string) => void
   onSessionCreated: (sessionId: string, generation: string | undefined, isAlive: boolean) => void
   onSessionExit: (sessionId: string, generation: string | undefined) => void
@@ -107,13 +109,27 @@ export async function createOrAttachTerminalSession(
   deps.killedTombstones.clearForCreate(opts.sessionId)
   const size = normalizePtySize(opts.cols, opts.rows)
   const wslDistro = resolveWslSessionContext(opts)?.distro
-  return await spawnAndPublishSession(opts, deps, { size, wslDistro })
+  const lease = deps.spawnGate?.admit({
+    clientId: opts.spawnAdmission?.clientId ?? 'in-process',
+    declaredIntent: opts.spawnAdmission?.declaredIntent ?? null,
+    hasAgentSessionClaim: opts.agentSessionEnsure !== undefined,
+    hasHistorySeed: (opts.historySeedChunks?.length ?? 0) > 0,
+    deadlineAt: opts.spawnAdmission?.deadlineAt ?? Number.POSITIVE_INFINITY
+  })
+  try {
+    return await spawnAndPublishSession(opts, deps, { size, wslDistro }, (sessionId, isAlive) =>
+      lease?.commit(sessionId, isAlive)
+    )
+  } finally {
+    lease?.abandon()
+  }
 }
 
 async function spawnAndPublishSession(
   opts: InternalCreateOrAttachOptions,
   deps: TerminalHostSessionCreateDependencies,
-  ctx: { size: { cols: number; rows: number }; wslDistro: string | undefined }
+  ctx: { size: { cols: number; rows: number }; wslDistro: string | undefined },
+  onPublished: (sessionId: string, isAlive: boolean) => void
 ): Promise<CreateOrAttachResult> {
   const { size, wslDistro } = ctx
   // Why before the fork: the shell's own cwd may already have fallen back, so probe the requested path.
@@ -164,7 +180,8 @@ async function spawnAndPublishSession(
       deps.onSessionExit,
       opts.sessionId,
       opts.agentSessionGeneration,
-      () => discardStagedStartupCommand(staging)
+      () => discardStagedStartupCommand(staging),
+      deps.spawnGate
     ),
     ...(deps.reportReadinessEvent ? { reportReadinessEvent: deps.reportReadinessEvent } : {}),
     ...(opts.shellReadyTimeoutMs !== undefined
@@ -186,6 +203,7 @@ async function spawnAndPublishSession(
 
   deps.sessions.set(opts.sessionId, session)
   deps.onSessionCreated(opts.sessionId, opts.agentSessionGeneration, session.isAlive)
+  onPublished(opts.sessionId, session.isAlive)
   const token = session.attachClient(opts.streamClient)
 
   const startupCommandWritten =
@@ -246,10 +264,12 @@ function createSessionExitHandler(
   onSessionExit: TerminalHostSessionCreateDependencies['onSessionExit'],
   sessionId: string,
   generation: string | undefined,
-  discardStagedCommand: () => void
+  discardStagedCommand: () => void,
+  spawnGate: TerminalSpawnGate | undefined
 ): () => void {
   return () => {
     discardStagedCommand()
+    spawnGate?.onSessionExit(sessionId)
     onSessionExit(sessionId, generation)
   }
 }

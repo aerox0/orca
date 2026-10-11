@@ -21,6 +21,7 @@ import { DaemonTerminalAdmission } from './daemon-terminal-admission'
 import { checkPtySpawnHealth } from './pty-subprocess'
 import { TerminalHistorySeedTransferRegistry } from './terminal-history-seed-transfer-registry'
 import { TerminalHost } from './terminal-host'
+import { TerminalSpawnGate } from './terminal-spawn-gate'
 import {
   CLEAN_DISCONNECT_PROTOCOL_VERSION,
   NOTIFY_PREFIX,
@@ -50,6 +51,7 @@ export class DaemonServer {
     this.log = options.log ?? createNoopDaemonFileLog()
     this.host = new TerminalHost({
       spawnSubprocess: options.spawnSubprocess,
+      spawnGate: new TerminalSpawnGate({ log: (event, details) => this.log.log(event, details) }),
       reportReadinessEvent: (event, details) => this.log.log(event, details),
       onSessionReaped: (sessionId) => {
         this.attachments.release(sessionId)

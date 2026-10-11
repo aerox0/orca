@@ -23,6 +23,17 @@ import { type DaemonRequest, TerminalAttachCanceledError } from './types'
 
 type CreateOrAttachRequest = Extract<DaemonRequest, { type: 'createOrAttach' }>
 
+const DEFAULT_SPAWN_ADMISSION_WINDOW_MS = 15_000
+
+// Why half: a paced fork must still finish before the caller's own cancellation fires.
+function resolveSpawnAdmissionDeadline(cancelAfterMs: unknown): number {
+  const windowMs =
+    Number.isSafeInteger(cancelAfterMs) && Number(cancelAfterMs) > 0
+      ? Math.min(Number(cancelAfterMs), 300_000) / 2
+      : DEFAULT_SPAWN_ADMISSION_WINDOW_MS
+  return Date.now() + windowMs
+}
+
 type DaemonTerminalAdmissionOptions = {
   host: TerminalHost
   connections: DaemonClientConnections
@@ -115,6 +126,11 @@ export class DaemonTerminalAdmission {
           ? { shellReadyTimeoutMs: payload.shellReadyTimeoutMs }
           : {}),
         ...(payload.agentSessionEnsure ? { agentSessionEnsure: payload.agentSessionEnsure } : {}),
+        spawnAdmission: {
+          clientId,
+          declaredIntent: null,
+          deadlineAt: resolveSpawnAdmissionDeadline(payload.cancelAfterMs)
+        },
         isCanceled: () => spawnPreparation?.canceled === true,
         cancelSignal: spawnPreparation.controller.signal,
         onSessionResolved: (sessionId) => {
